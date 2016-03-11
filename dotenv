@@ -1,0 +1,102 @@
+#!/bin/sh
+''''exec python -u -- "$0" ${1+"$@"} # '''
+# vi: syntax=python
+"""
+Utility to read one or more environment variable files before executing a command
+
+If no environment files are specified, `$(pwd)/.env` is used.  When multiple are
+specified, they are applied in the order they are given, last one wins.  So, if
+a variable is specified in multiple files, the last value will be in the environment.
+
+This script uses bash to read in the environment and expects each item in the .env
+file to be in the following format:
+
+```
+export ENV1=foo
+```
+
+By letting bash process the file, this is also possible:
+
+```
+export ENV1=foo
+export ENV2=${ENV1}
+```
+"""
+import os
+import shlex
+import sys
+
+from subprocess import PIPE, Popen
+
+# for subprocess set unbuffered output
+os.environ['PYTHONUNBUFFERED'] = '1'
+
+def get_dot_env(path):
+    if os.path.exists(path):
+        # use bash to do the actual heavy lifting
+        command = shlex.split('/bin/bash -c "source {} && env"'.format(path))
+        proc = Popen(command, stdout=PIPE, env={})
+        stdout = proc.communicate()[0].decode('utf8')
+
+        _env = {}
+        for line in stdout.splitlines():
+            k, v = line.split('=', 1)
+            _env[k] = v
+
+        return _env
+
+
+def set_env(paths):
+    _env = {}
+
+    for path in paths:
+        dot_env = get_dot_env(path)
+        _env.update(dot_env)
+
+    os.environ.update(_env)
+
+
+if __name__ == '__main__':
+    import argparse
+    import select
+    import subprocess
+    import sys
+
+    current_dir = os.getcwd()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--python', action='store_true', help='add the python interpreter to the command')
+    parser.add_argument('--proxy', action='store_true', help='proxy instead of exec')
+    parser.add_argument('-f', '--file', action='append', help='path to environment file, default .env in current dir')
+    parser.add_argument('command', nargs=argparse.REMAINDER)
+
+    args = parser.parse_args()
+
+    files = args.file
+    if files is None:
+        files = [os.path.join(current_dir, '.env')]
+
+    set_env(files)
+
+    full_command = args.command
+    if args.python:
+        full_command = [sys.executable] + full_command
+
+    if not full_command:
+        sys.exit('no command given')
+
+    if not args.proxy:
+        os.execvpe(full_command[0], full_command, os.environ)
+        sys.exit(0)
+
+    # with the newest PyCharm / Python3 cannot simply exec a new call, instead proxy the subprocess
+    proc = subprocess.Popen(full_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stdout, stdin = proc.stdout, proc.stdin
+
+    while True:
+        r, _, _ = select.select([stdout, sys.stdin], [], [])
+        if stdout in r:
+            sys.stdout.write(stdout.read(1))
+            sys.stdout.flush()
+        elif sys.stdin in r:
+            stdin.write(bytes(sys.stdin.read(1)))
